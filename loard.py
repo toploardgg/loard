@@ -10,6 +10,7 @@ import psutil
 import requests
 import pandas as pd
 import queue
+import warnings
 from datetime import datetime
 from colorama import init, Fore
 from tqdm import tqdm
@@ -17,11 +18,17 @@ from tqdm import tqdm
 init(autoreset=True)
 
 try:
-    from scapy.all import ARP, Ether, srp
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        from scapy.all import ARP, Ether, srp
+    scapy_output = buf.getvalue()
+    if scapy_output:
+        print(scapy_output.strip())
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
-
 sys.excepthook = lambda *args: None
 
 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
@@ -187,11 +194,25 @@ def get_local_ip():
 
 def get_gateway():
     try:
-        import netifaces
-        g = netifaces.gateways().get('default', {}).get(netifaces.AF_INET)
-        return g[0] if g else "Unknown"
-    except ImportError:
-        return "Unknown"
+        if platform.system() == "Windows":
+            out = subprocess.check_output("ipconfig", shell=True, text=True, encoding="cp866", errors='ignore')
+            for line in out.splitlines():
+                if "Default Gateway" in line or "Default Gateway" in line:
+                    parts = line.split(":")
+                    if len(parts) > 1:
+                        gw = parts[1].strip()
+                        if gw and gw != "":
+                            return gw
+        else:
+            out = subprocess.check_output("ip route", shell=True, text=True, errors='ignore')
+            for line in out.splitlines():
+                if line.startswith("default"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        return parts[2]
+    except Exception:
+        pass
+    return "Unknown"
 
 def get_dns():
     dns = []
@@ -235,43 +256,36 @@ def wifi_scan():
     nets = []
     try:
         if platform.system() == "Windows":
-            out = subprocess.check_output("netsh wlan show networks", shell=True, text=True, encoding="cp866", errors='ignore')
+            out = None
+            for encoding in ("utf-8", "cp1251", "cp866"):
+                try:
+                    out = subprocess.check_output(
+                        "netsh wlan show networks mode=Bssid",
+                        shell=True,
+                        text=True,
+                        encoding=encoding,
+                        errors='ignore',
+                        stderr=subprocess.DEVNULL
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if out is None:
+                return nets
+
             for line in out.splitlines():
+                line = line.strip()
                 if "SSID" in line and "BSSID" not in line:
-                    ssid = line.split(":",1)[1].strip()
-                    if ssid and ssid not in nets:
-                        nets.append(ssid)
-        elif platform.system() == "Darwin":
-            airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-            if os.path.exists(airport):
-                out = subprocess.check_output(f'"{airport}" -s', shell=True, text=True, errors='ignore')
-                for line in out.splitlines()[1:]:
-                    parts = line.strip().split()
-                    if parts:
-                        ssid = " ".join(parts[:-5]) if len(parts) > 5 else parts[0]
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        ssid = parts[1].strip()
                         if ssid and ssid not in nets:
                             nets.append(ssid)
-        else:
-            try:
-                out = subprocess.check_output("nmcli -t -f SSID dev wifi", shell=True, text=True, errors='ignore')
-                for line in out.splitlines():
-                    ssid = line.strip()
-                    if ssid and ssid not in nets:
-                        nets.append(ssid)
-            except Exception:
-                try:
-                    out = subprocess.check_output("iwlist scanning", shell=True, text=True, errors='ignore')
-                    for line in out.splitlines():
-                        if "ESSID" in line:
-                            ssid = line.split("ESSID:")[-1].strip().strip('"')
-                            if ssid and ssid not in nets:
-                                nets.append(ssid)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return nets
 
+    except Exception as e:
+        print(f"[wifi_scan] Error: {e}")
+    return nets
 def wifi_password(ssid):
     try:
         sys_name = platform.system()
@@ -545,6 +559,18 @@ class MountWatcher(threading.Thread):
                 self.known_mounts = current
             time.sleep(self.check_interval)
 
+def get_connection_type():
+    try:
+        for iface, stats in psutil.net_if_stats().items():
+            if not stats.isup:
+                continue
+            iface_lower = iface.lower()
+            if any(x in iface_lower for x in ("wi", "wlan", "wlp", "airport", "wireless")):
+                return "wifi"
+    except Exception:
+        pass
+    return "ethernet"
+
 def main():
     set_title("loard")
     init_log()
@@ -553,36 +579,42 @@ def main():
 
     while True:
         try:
-            log_print(Fore.WHITE + "\nWi-Fi Networks choose number...\n")
-            nets = wifi_scan()
+            conn_type = get_connection_type()
 
-            if not nets:
-                log_print(Fore.WHITE + "No Wi-Fi networks found.")
-                log_print(Fore.WHITE + "Press Enter to retry or q to quit")
-                c = input("> ").strip().lower()
-                if c == "q":
+            if conn_type == "ethernet":
+                ssid = "Ethernet"
+                pw = "N/A"
+            else:
+                log_print(Fore.WHITE + "\nWi-Fi Networks choose number...\n")
+                nets = wifi_scan()
+
+                if not nets:
+                    log_print(Fore.WHITE + "No Wi-Fi networks found.")
+                    log_print(Fore.WHITE + "Press Enter to retry or q to quit")
+                    c = input("> ").strip().lower()
+                    if c == "q":
+                        break
+                    continue
+
+                for i, n in enumerate(nets):
+                    log_print(Fore.WHITE + f"{i+1}. {n}")
+
+                log_print(Fore.WHITE + "\nChoose number or q:")
+                c = input("> ").strip()
+                if c.lower() == "q":
                     break
-                continue
+                if not c.isdigit():
+                    log_print(Fore.WHITE + "Invalid.")
+                    continue
 
-            for i, n in enumerate(nets):
-                log_print(Fore.WHITE + f"{i+1}. {n}")
+                idx = int(c) - 1
+                if idx < 0 or idx >= len(nets):
+                    log_print(Fore.WHITE + "Invalid.")
+                    continue
 
-            log_print(Fore.WHITE + "\nChoose number or q:")
-            c = input("> ").strip()
-            if c.lower() == "q":
-                log_print(Fore.WHITE + "Exit.")
-                break
-            if not c.isdigit():
-                log_print(Fore.WHITE + "Invalid.")
-                continue
+                ssid = nets[idx]
+                pw = wifi_password(ssid)
 
-            idx = int(c) - 1
-            if idx < 0 or idx >= len(nets):
-                log_print(Fore.WHITE + "Invalid.")
-                continue
-
-            ssid = nets[idx]
-            pw = wifi_password(ssid)
             ip = get_local_ip()
             dns = get_dns()
             ext = get_external_ip()
@@ -593,14 +625,14 @@ def main():
                 pbar.update(15)
 
                 pbar.set_description("Getting external IP & DNS")
-                time.sleep(0.4)
+                time.sleep(0.3)
                 pbar.update(15)
 
                 pbar.set_description(f"Scanning network - {ssid}")
                 try:
                     base3 = '.'.join(ip.split('.')[:3])
                     raw_devices = scan(base3 + ".0/24")
-                except:
+                except Exception:
                     raw_devices = []
                 pbar.update(35)
 
@@ -637,10 +669,11 @@ def main():
 
         except KeyboardInterrupt:
             break
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {e}")
             time.sleep(0.5)
 
     log_print(Fore.WHITE + "Program terminated.")
-
+     
 if __name__ == "__main__":
     main()
