@@ -36,54 +36,6 @@ ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 def clear():
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def process_with_progress(ssid, pw):
-    ip = get_local_ip()
-    dns = get_dns()
-    ext = get_external_ip()
-
-    total_steps = 100
-    with tqdm(total=total_steps, desc="Data collection", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]", colour="white") as pbar:
-
-        pbar.set_description("Obtaining a local IP")
-        time.sleep(0.3)
-        pbar.update(10)
-
-        pbar.set_description("Obtaining DNS and external IP")
-        time.sleep(0.4)
-        pbar.update(15)
-
-        pbar.set_description(f"Network scanning {ssid}...")
-        try:
-            base3 = '.'.join(ip.split('.')[:3])
-            raw = scan(base3 + ".0/24")
-        except:
-            raw = []
-        scan_time = len(raw) * 0.05 + 1
-        time.sleep(0.3)
-        pbar.update(40)
-
-        pbar.set_description("Getting device names")
-        rec = []
-        step_per_device = 25 / max(1, len(raw))
-        for device in raw:
-            ip_dev = device.get('ip', 'Unknown')
-            hostname = get_hostname(ip_dev)
-            device['hostname'] = hostname
-            rec.append({
-                'ip': ip_dev,
-                'mac': device.get('mac', 'Unknown').upper(),
-                'vendor': "Unknown",
-                'hostname': hostname,
-                'passkey': f"passkey-({pw})"
-            })
-            pbar.update(step_per_device)
-            time.sleep(0.02)
-        pbar.set_description("Output Formation")
-        time.sleep(0.3)
-        pbar.update(10)
-
-    display(ip, rec if rec else device_records(raw, pw), dns, ext)
-
 def set_title(title):
     if platform.system() == "Windows":
         os.system(f"title {title}")
@@ -96,7 +48,7 @@ def get_possible_mounts():
     if platform.system() == "Windows":
         from string import ascii_uppercase
         for letter in ascii_uppercase:
-            path = f"{letter}:\\" 
+            path = f"{letter}:\\"
             if os.path.exists(path):
                 mounts.append(path)
     else:
@@ -197,11 +149,11 @@ def get_gateway():
         if platform.system() == "Windows":
             out = subprocess.check_output("ipconfig", shell=True, text=True, encoding="cp866", errors='ignore')
             for line in out.splitlines():
-                if "Default Gateway" in line or "Default Gateway" in line:
+                if "Default Gateway" in line:
                     parts = line.split(":")
                     if len(parts) > 1:
                         gw = parts[1].strip()
-                        if gw and gw != "":
+                        if gw:
                             return gw
         else:
             out = subprocess.check_output("ip route", shell=True, text=True, errors='ignore')
@@ -220,7 +172,7 @@ def get_dns():
         if platform.system() == "Windows":
             out = subprocess.check_output("ipconfig /all", shell=True, text=True, encoding="cp866", errors='ignore')
             for line in out.splitlines():
-                if "DNS Servers" in line or "DNS Servers" in line:
+                if "DNS Servers" in line:
                     parts = line.split(":")
                     if len(parts) > 1:
                         d = parts[1].strip()
@@ -252,6 +204,106 @@ def get_dns():
         pass
     return dns
 
+def get_local_hostname():
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "Unknown"
+
+def get_subnet_mask():
+    try:
+        for iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET and not addr.address.startswith("127."):
+                    return addr.netmask or "Unknown"
+    except Exception:
+        pass
+    return "Unknown"
+
+def get_local_mac():
+    try:
+        for iface, addrs in psutil.net_if_addrs().items():
+            has_global_ipv4 = any(
+                a.family == socket.AF_INET and not a.address.startswith("127.")
+                for a in addrs
+            )
+            if has_global_ipv4:
+                for addr in addrs:
+                    if addr.family == psutil.AF_LINK:
+                        return addr.address.upper().replace("-", ":")
+    except Exception:
+        pass
+    return "Unknown"
+
+def get_ipv6():
+    try:
+        for iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET6:
+                    ip6 = addr.address.split("%")[0]
+                    if not ip6.startswith("fe80") and ip6 != "::1":
+                        return ip6
+    except Exception:
+        pass
+    return "Unknown"
+
+def get_dhcp_info():
+    info = {"enabled": "Unknown", "server": "Unknown", "lease_obtained": "Unknown", "lease_expires": "Unknown"}
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.check_output(
+                "wmic nicconfig where IPEnabled=True get DHCPEnabled,DHCPServer,DHCPLeaseObtained,DHCPLeaseExpires",
+                shell=True, text=True, encoding="utf-8", errors="ignore", stderr=subprocess.DEVNULL
+            )
+            lines = [l.strip() for l in out.splitlines() if l.strip()]
+            if len(lines) >= 2:
+                headers = lines[0].split()
+                values = lines[1].split()
+                d = dict(zip(headers, values))
+                info["enabled"] = d.get("DHCPEnabled", "Unknown")
+                info["server"] = d.get("DHCPServer", "Unknown")
+                for key, field in [("DHCPLeaseObtained", "lease_obtained"), ("DHCPLeaseExpires", "lease_expires")]:
+                    raw = d.get(key, "")
+                    if raw:
+                        try:
+                            info[field] = datetime.strptime(raw[:14], "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            info[field] = raw
+        else:
+            out = subprocess.check_output(
+                "nmcli -t -f IP4.ADDRESS,DHCP4.OPTION device show",
+                shell=True, text=True, errors="ignore"
+            )
+            for line in out.splitlines():
+                if "dhcp_server_identifier" in line:
+                    info["server"] = line.split("=", 1)[-1].strip()
+                    info["enabled"] = "Yes"
+                if "expiry" in line:
+                    ts = line.split("=", 1)[-1].strip()
+                    try:
+                        info["lease_expires"] = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        info["lease_expires"] = ts
+    except Exception:
+        pass
+    return info
+
+def get_adapter_info():
+    adapters = []
+    try:
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+        for iface, addr_list in addrs.items():
+            ipv4 = next((a.address for a in addr_list if a.family == socket.AF_INET), None)
+            if not ipv4 or ipv4.startswith("127."):
+                continue
+            mac = next((a.address.upper().replace("-", ":") for a in addr_list if a.family == psutil.AF_LINK), "Unknown")
+            speed = stats[iface].speed if iface in stats else 0
+            adapters.append({"name": iface, "ipv4": ipv4, "mac": mac, "speed_mbps": speed})
+    except Exception:
+        pass
+    return adapters
+
 def wifi_scan():
     nets = []
     try:
@@ -261,19 +313,14 @@ def wifi_scan():
                 try:
                     out = subprocess.check_output(
                         "netsh wlan show networks mode=Bssid",
-                        shell=True,
-                        text=True,
-                        encoding=encoding,
-                        errors='ignore',
-                        stderr=subprocess.DEVNULL
+                        shell=True, text=True, encoding=encoding,
+                        errors='ignore', stderr=subprocess.DEVNULL
                     )
                     break
                 except Exception:
                     continue
-
             if out is None:
                 return nets
-
             for line in out.splitlines():
                 line = line.strip()
                 if "SSID" in line and "BSSID" not in line:
@@ -282,26 +329,22 @@ def wifi_scan():
                         ssid = parts[1].strip()
                         if ssid and ssid not in nets:
                             nets.append(ssid)
-
     except Exception as e:
         print(f"[wifi_scan] Error: {e}")
     return nets
+
 def wifi_password(ssid):
     try:
         sys_name = platform.system()
         if sys_name == "Windows":
             out = subprocess.check_output(
                 f'netsh wlan show profile name="{ssid}" key=clear',
-                shell=True,
-                text=True,
-                encoding="cp866",
-                errors='ignore',
-                stderr=subprocess.DEVNULL
+                shell=True, text=True, encoding="cp866",
+                errors='ignore', stderr=subprocess.DEVNULL
             )
             for line in out.splitlines():
                 if "Key Content" in line:
                     return line.split(":", 1)[1].strip()
-
         elif sys_name == "Darwin":
             cmd = f'security find-generic-password -D "AirPort network password" -a "{ssid}" -gw'
             try:
@@ -309,14 +352,11 @@ def wifi_password(ssid):
                 return out.strip()
             except subprocess.CalledProcessError:
                 return "Unknown"
-
         else:
             try:
                 out = subprocess.check_output(
                     f'nmcli -s -g 802-11-wireless-security.psk connection show "{ssid}"',
-                    shell=True,
-                    text=True,
-                    stderr=subprocess.DEVNULL
+                    shell=True, text=True, stderr=subprocess.DEVNULL
                 )
                 password = out.strip()
                 if password:
@@ -337,7 +377,6 @@ def wifi_password(ssid):
                             continue
                 except Exception:
                     pass
-
     except Exception:
         pass
     return "Unknown"
@@ -463,7 +502,7 @@ def banner():
 ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝        ╚══╝╚═══╝   
 ''' + Fore.RED + '--- Wi-Fi tool by Toploardgg ---\n'
 
-def device_records(raw_devices, password):
+def device_records(raw_devices):
     records = []
     for device in raw_devices:
         ip = device.get('ip', 'Unknown')
@@ -474,33 +513,49 @@ def device_records(raw_devices, password):
             'mac': mac,
             'vendor': "Unknown",
             'hostname': hostname,
-            'passkey': f"passkey-({password})"
         })
     return records
 
 def display(local_ip, devices, dns_servers, external_ip):
     clear()
     log_print(banner())
-    log_print(Fore.WHITE + f"Local IP: {local_ip}")
-    log_print(Fore.WHITE + f"Gateway: {get_gateway()}")
+    log_print(Fore.WHITE + f"Local IP:       {local_ip}")
+    log_print(Fore.WHITE + f"Gateway:        {get_gateway()}")
     try:
         subnet = '.'.join(local_ip.split('.')[:3]) + ".1/24"
     except Exception:
         subnet = "Unknown"
-    log_print(Fore.WHITE + f"Subnet: {subnet}\n")
-    log_print(Fore.WHITE + "DNS:")
+    log_print(Fore.WHITE + f"Subnet:         {subnet}\n")
+    log_print(Fore.WHITE + f"External IP:    {external_ip}\n")
+    log_print(connections_text())
+    log_print(Fore.WHITE + f"\nHostname:       {get_local_hostname()}")
+    log_print(Fore.WHITE + f"Subnet Mask:    {get_subnet_mask()}")
+    log_print(Fore.WHITE + f"MAC (local):    {get_local_mac()}")
+    log_print(Fore.WHITE + f"IPv6:           {get_ipv6()}")
+    log_print(Fore.WHITE + "\nDNS:")
     if dns_servers:
         for dns in dns_servers:
-            log_print(Fore.WHITE + f"- {dns}")
+            log_print(Fore.WHITE + f"  - {dns}")
     else:
-        log_print(Fore.WHITE + "None")
-    log_print("\n" + Fore.WHITE + f"External IP: {external_ip}\n")
-    log_print(connections_text())
+        log_print(Fore.WHITE + "  None")
+    dhcp = get_dhcp_info()
+    log_print(Fore.WHITE + f"\nDHCP Enabled:   {dhcp['enabled']}")
+    log_print(Fore.WHITE + f"DHCP Server:    {dhcp['server']}")
+    log_print(Fore.WHITE + f"Lease Obtained: {dhcp['lease_obtained']}")
+    log_print(Fore.WHITE + f"Lease Expires:  {dhcp['lease_expires']}\n")
+    adapters = get_adapter_info()
+    if adapters:
+        log_print(Fore.WHITE + "[Adapters]\n")
+        log_print(Fore.WHITE + "{:<20} {:<16} {:<20} {:<10}".format("Adapter", "IP", "MAC", "Speed(Mbps)"))
+        log_print("-" * 70)
+        for a in adapters:
+            log_print(Fore.WHITE + f"{a['name']:<20} {a['ipv4']:<16} {a['mac']:<20} {a['speed_mbps']:<10}")
+        log_print("")
     log_print(Fore.WHITE + "\n[Devices]\n")
-    log_print(Fore.WHITE + "{:<16} {:<18} {:<20} {:<25} {:<20}".format("IP", "MAC", "Vendor", "Hostname", "Passkey"))
-    log_print("-" * 100)
+    log_print(Fore.WHITE + "{:<16} {:<18} {:<20} {:<25}".format("IP", "MAC", "Vendor", "Hostname"))
+    log_print("-" * 80)
     for device in devices:
-        log_print(Fore.WHITE + f"{device['ip']:<16} {device['mac']:<18} {device['vendor']:<20} {device['hostname']:<25} {device['passkey']:<20}")
+        log_print(Fore.WHITE + f"{device['ip']:<16} {device['mac']:<18} {device['vendor']:<20} {device['hostname']:<25}")
     if devices:
         df = pd.DataFrame(devices)
         log_print(Fore.WHITE + "\n[DataFrame]\n")
@@ -564,8 +619,7 @@ def get_connection_type():
         for iface, stats in psutil.net_if_stats().items():
             if not stats.isup:
                 continue
-            iface_lower = iface.lower()
-            if any(x in iface_lower for x in ("wi", "wlan", "wlp", "airport", "wireless")):
+            if any(x in iface.lower() for x in ("wi", "wlan", "wlp", "airport", "wireless")):
                 return "wifi"
     except Exception:
         pass
@@ -647,7 +701,6 @@ def main():
                             'mac': dev.get('mac', 'Unknown').upper(),
                             'vendor': 'Unknown',
                             'hostname': hostname,
-                            'passkey': f"passkey-({pw})"
                         })
                         pbar.update(step)
                         time.sleep(0.008)
@@ -658,8 +711,6 @@ def main():
                 time.sleep(0.3)
                 pbar.update(5)
 
-            clear()
-            log_print(banner())
             display(ip, records, dns, ext)
 
             print(Fore.WHITE + "\nEnter = refresh, q = quit")
@@ -674,6 +725,6 @@ def main():
             time.sleep(0.5)
 
     log_print(Fore.WHITE + "Program terminated.")
-     
+
 if __name__ == "__main__":
     main()
