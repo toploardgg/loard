@@ -33,6 +33,26 @@ sys.excepthook = lambda *args: None
 
 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+COMMON_PORTS = {
+    21:   "FTP",
+    22:   "SSH",
+    23:   "Telnet",
+    25:   "SMTP",
+    53:   "DNS",
+    80:   "HTTP",
+    110:  "POP3",
+    135:  "RPC",
+    139:  "NetBIOS",
+    143:  "IMAP",
+    443:  "HTTPS",
+    445:  "SMB",
+    3306: "MySQL",
+    3389: "RDP",
+    5900: "VNC",
+    8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+}
+
 def clear():
     os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -67,56 +87,56 @@ def get_possible_mounts():
 
 log_file = None
 
+def get_usb_drive():
+    if platform.system() != "Windows":
+        return None
+    try:
+        for part in psutil.disk_partitions():
+            opts = part.opts.lower()
+            if "removable" in opts:
+                return part.mountpoint
+    except Exception:
+        pass
+    return None
+
 def init_log():
     global log_file
     filename = datetime.now().strftime("%d.%m.%y_%H-%M") + ".txt"
-    drives_to_check = ["G:\\", "H:\\"] if platform.system() == "Windows" else []
 
-    for drive in drives_to_check:
-        log_dir = os.path.join(drive, "log")
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-            test_file = os.path.join(log_dir, "tmp.txt")
-            with open(test_file, "w") as f:
-                f.write("test")
-            os.remove(test_file)
-            log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
-            return log_file
-        except Exception:
-            continue
-
-    if platform.system() != "Windows":
-        mount_points = []
-        for base in ("/media", "/run/media", "/mnt", "/Volumes"):
-            if os.path.exists(base):
-                try:
-                    for user_dir in os.listdir(base):
-                        user_path = os.path.join(base, user_dir)
-                        if os.path.isdir(user_path):
-                            for mnt in os.listdir(user_path):
-                                full_path = os.path.join(user_path, mnt)
-                                if os.path.ismount(full_path):
-                                    mount_points.append(full_path)
-                except Exception:
-                    continue
-        for mount in mount_points:
-            log_dir = os.path.join(mount, "log")
+    if platform.system() == "Windows":
+        usb_drive = get_usb_drive()
+        if usb_drive:
             try:
+                log_dir = os.path.join(usb_drive, "log")
                 os.makedirs(log_dir, exist_ok=True)
-                test_file = os.path.join(log_dir, "tmp.txt")
-                with open(test_file, "w") as f:
-                    f.write("test")
-                os.remove(test_file)
                 log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
                 return log_file
             except Exception:
-                continue
+                pass
+        return None
 
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    log_dir = os.path.join(base_dir, "log")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
-    return log_file
+    for base in ("/media", "/run/media", "/mnt", "/Volumes"):
+        if not os.path.exists(base):
+            continue
+        try:
+            for user_dir in os.listdir(base):
+                user_path = os.path.join(base, user_dir)
+                if not os.path.isdir(user_path):
+                    continue
+                for mnt in os.listdir(user_path):
+                    full_path = os.path.join(user_path, mnt)
+                    if os.path.ismount(full_path):
+                        log_dir = os.path.join(full_path, "log")
+                        os.makedirs(log_dir, exist_ok=True)
+                        test_file = os.path.join(log_dir, "tmp.txt")
+                        with open(test_file, "w") as f:
+                            f.write("test")
+                        os.remove(test_file)
+                        log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
+                        return log_file
+        except Exception:
+            continue
+    return None
 
 def log_print(text=""):
     print(text)
@@ -306,8 +326,9 @@ def get_adapter_info():
 
 def wifi_scan():
     nets = []
+    system = platform.system()
     try:
-        if platform.system() == "Windows":
+        if system == "Windows":
             out = None
             for encoding in ("utf-8", "cp1251", "cp866"):
                 try:
@@ -329,6 +350,43 @@ def wifi_scan():
                         ssid = parts[1].strip()
                         if ssid and ssid not in nets:
                             nets.append(ssid)
+        elif system == "Darwin":
+            try:
+                airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+                out = subprocess.check_output([airport, "-s"], text=True, stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    if not line.strip() or line.startswith("SSID"):
+                        continue
+                    ssid = line.split()[0]
+                    if ssid and ssid not in nets:
+                        nets.append(ssid)
+            except Exception:
+                pass
+        elif system == "Linux":
+            try:
+                out = subprocess.check_output(["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list"], text=True, stderr=subprocess.DEVNULL)
+                nets = [line.strip() for line in out.splitlines() if line.strip()]
+                if not nets:
+                    out = subprocess.check_output(["nmcli", "dev", "wifi", "list"], text=True, stderr=subprocess.DEVNULL)
+                    for line in out.splitlines():
+                        if line.strip() and not line.startswith("*") and not line.startswith("SSID"):
+                            parts = line.split()
+                            if parts:
+                                ssid = parts[0]
+                                if ssid and ssid not in nets:
+                                    nets.append(ssid)
+            except Exception:
+                try:
+                    out = subprocess.check_output(["iwlist", "scan"], text=True, stderr=subprocess.DEVNULL)
+                    for line in out.splitlines():
+                        if 'ESSID:"' in line:
+                            ssid = re.search(r'ESSID:"(.+?)"', line)
+                            if ssid:
+                                ssid = ssid.group(1).strip()
+                                if ssid and ssid not in nets:
+                                    nets.append(ssid)
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[wifi_scan] Error: {e}")
     return nets
@@ -492,6 +550,151 @@ def get_external_ip():
     except Exception:
         return "Unknown"
 
+def get_traffic_graph(sample_sec: float = 1.0) -> str:
+    BAR_WIDTH = 28
+    try:
+        snap1 = psutil.net_io_counters(pernic=True)
+        time.sleep(sample_sec)
+        snap2 = psutil.net_io_counters(pernic=True)
+
+        lines = [Fore.WHITE + "[Traffic  (KB/s)]\n",
+                 Fore.WHITE + f"{'Interface':<18} {'▲ Sent':>10} {'▼ Recv':>10}  Graph",
+                 Fore.WHITE + "─" * 65]
+
+        any_active = False
+        for iface in snap1:
+            if iface not in snap2:
+                continue
+            sent = max((snap2[iface].bytes_sent - snap1[iface].bytes_sent) / 1024 / sample_sec, 0)
+            recv = max((snap2[iface].bytes_recv - snap1[iface].bytes_recv) / 1024 / sample_sec, 0)
+            if sent == 0 and recv == 0:
+                continue
+            any_active = True
+            peak = max(sent, recv, 0.001)
+            sb = int(sent / peak * BAR_WIDTH)
+            rb = int(recv / peak * BAR_WIDTH)
+            bar = Fore.GREEN + "▲" * sb + Fore.CYAN + "▼" * rb + Fore.WHITE
+            lines.append(
+                Fore.WHITE + f"{iface:<18} {sent:>8.1f}KB {recv:>8.1f}KB  {bar}"
+            )
+
+        if not any_active:
+            lines.append(Fore.WHITE + "  No active traffic detected")
+        lines.append("")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return Fore.WHITE + f"[Traffic] Error: {e}\n"
+
+def scan_ports(ip: str, timeout: float = 0.5) -> list[int]:
+    open_ports: list[int] = []
+    lock = threading.Lock()
+
+    def probe(port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            if s.connect_ex((ip, port)) == 0:
+                with lock:
+                    open_ports.append(port)
+            s.close()
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=probe, args=(p,), daemon=True)
+               for p in COMMON_PORTS]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 0.2)
+
+    return sorted(open_ports)
+
+def ports_label(open_ports: list[int]) -> str:
+    if not open_ports:
+        return "none"
+    return "  ".join(f"{p}({COMMON_PORTS.get(p, '?')})" for p in open_ports)
+
+def get_os_by_ttl(ip: str) -> str:
+    try:
+        if platform.system() == "Windows":
+            cmd = ["ping", "-n", "1", "-w", "800", ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", "1", ip]
+
+        raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True,
+                                      errors="ignore")
+        m = re.search(r'ttl[= ](\d+)', raw, re.IGNORECASE)
+        if m:
+            ttl = int(m.group(1))
+            if ttl <= 64:
+                return "Linux/macOS"
+            elif ttl <= 128:
+                return "Windows"
+            else:
+                return "Net Device"
+    except Exception:
+        pass
+    return "Unknown"
+
+_vendor_cache: dict[str, str] = {}
+
+def get_vendor(mac: str) -> str:
+    oui = mac.replace(":", "").replace("-", "")[:6].upper()
+    if oui in _vendor_cache:
+        return _vendor_cache[oui]
+    try:
+        resp = requests.get(f"https://api.macvendors.com/{oui}", timeout=3)
+        if resp.status_code == 200:
+            vendor = resp.text.strip()[:24]
+        elif resp.status_code == 404:
+            vendor = "Unknown"
+        else:
+            vendor = "Unknown"
+    except Exception:
+        vendor = "Unknown"
+    _vendor_cache[oui] = vendor
+    return vendor
+
+def run_traceroute(target_ip: str) -> str:
+    lines = [Fore.WHITE + f"[Traceroute → {target_ip}]\n"]
+    try:
+        if platform.system() == "Windows":
+            cmd = ["tracert", "-d", "-h", "15", "-w", "500", target_ip]
+        else:
+            cmd = ["traceroute", "-n", "-m", "15", "-w", "1", target_ip]
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, errors="ignore"
+        )
+
+        hop_re = re.compile(r'^\s*(\d+)')
+        for raw_line in proc.stdout:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if hop_re.match(stripped):
+                lines.append(Fore.WHITE + f"  {stripped}")
+        proc.wait(timeout=60)
+
+    except FileNotFoundError:
+        try:
+            out = subprocess.check_output(
+                ["tracepath", "-n", "-m", "15", target_ip],
+                stderr=subprocess.DEVNULL, text=True, errors="ignore", timeout=30
+            )
+            for raw_line in out.splitlines():
+                if re.match(r'^\s*\d+', raw_line):
+                    lines.append(Fore.WHITE + f"  {raw_line.strip()}")
+        except Exception:
+            lines.append(Fore.WHITE + "  traceroute / tracepath not available on this system")
+    except Exception as e:
+        lines.append(Fore.WHITE + f"  Error: {e}")
+
+    lines.append("")
+    return "\n".join(lines)
+
 def banner():
     return Fore.RED + r'''
 ██╗      ██████╗  █████╗ ██████╗ ██████╗        ██╗    ███╗
@@ -504,15 +707,27 @@ def banner():
 
 def device_records(raw_devices):
     records = []
-    for device in raw_devices:
-        ip = device.get('ip', 'Unknown')
+    for i, device in enumerate(raw_devices):
+        ip  = device.get('ip',  'Unknown')
         mac = device.get('mac', 'Unknown').upper()
+
         hostname = get_hostname(ip)
+        os_guess = get_os_by_ttl(ip)
+
+        if i > 0:
+            time.sleep(1.1)
+        vendor = get_vendor(mac)
+
+        open_ports = scan_ports(ip)
+        ports_str  = ports_label(open_ports)
+
         records.append({
-            'ip': ip,
-            'mac': mac,
-            'vendor': "Unknown",
+            'ip':       ip,
+            'mac':      mac,
+            'vendor':   vendor,
+            'os':       os_guess,
             'hostname': hostname,
+            'ports':    ports_str,
         })
     return records
 
@@ -527,6 +742,10 @@ def display(local_ip, devices, dns_servers, external_ip):
         subnet = "Unknown"
     log_print(Fore.WHITE + f"Subnet:         {subnet}\n")
     log_print(Fore.WHITE + f"External IP:    {external_ip}\n")
+
+    if external_ip and external_ip != "Unknown":
+        log_print(run_traceroute(external_ip))
+
     log_print(connections_text())
     log_print(Fore.WHITE + f"\nHostname:       {get_local_hostname()}")
     log_print(Fore.WHITE + f"Subnet Mask:    {get_subnet_mask()}")
@@ -543,19 +762,30 @@ def display(local_ip, devices, dns_servers, external_ip):
     log_print(Fore.WHITE + f"DHCP Server:    {dhcp['server']}")
     log_print(Fore.WHITE + f"Lease Obtained: {dhcp['lease_obtained']}")
     log_print(Fore.WHITE + f"Lease Expires:  {dhcp['lease_expires']}\n")
+
+    log_print(get_traffic_graph())
+
     adapters = get_adapter_info()
     if adapters:
         log_print(Fore.WHITE + "[Adapters]\n")
-        log_print(Fore.WHITE + "{:<20} {:<16} {:<20} {:<10}".format("Adapter", "IP", "MAC", "Speed(Mbps)"))
-        log_print("-" * 70)
+        log_print(Fore.WHITE + "{:<20} {:<16} {:<20} {:<10}".format(
+            "Adapter", "IP", "MAC", "Speed(Mbps)"))
+        log_print(Fore.WHITE + "─" * 70)
         for a in adapters:
             log_print(Fore.WHITE + f"{a['name']:<20} {a['ipv4']:<16} {a['mac']:<20} {a['speed_mbps']:<10}")
         log_print("")
+
     log_print(Fore.WHITE + "\n[Devices]\n")
-    log_print(Fore.WHITE + "{:<16} {:<18} {:<20} {:<25}".format("IP", "MAC", "Vendor", "Hostname"))
-    log_print("-" * 80)
+    log_print(Fore.WHITE + "{:<16} {:<18} {:<20} {:<14} {:<22}".format(
+        "IP", "MAC", "Vendor", "OS", "Hostname"))
+    log_print(Fore.WHITE + "─" * 90)
     for device in devices:
-        log_print(Fore.WHITE + f"{device['ip']:<16} {device['mac']:<18} {device['vendor']:<20} {device['hostname']:<25}")
+        log_print(Fore.WHITE + "{:<16} {:<18} {:<20} {:<14} {:<22}".format(
+            device['ip'], device['mac'], device['vendor'],
+            device['os'], device['hostname']))
+        log_print(Fore.WHITE + f"  {'Ports:':<12} {device['ports']}")
+        log_print("")
+
     if devices:
         df = pd.DataFrame(devices)
         log_print(Fore.WHITE + "\n[DataFrame]\n")
@@ -669,18 +899,23 @@ def main():
                 ssid = nets[idx]
                 pw = wifi_password(ssid)
 
-            ip = get_local_ip()
+            ip  = get_local_ip()
             dns = get_dns()
             ext = get_external_ip()
 
-            with tqdm(total=100, desc="Initializing...", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]", colour="white") as pbar:
+            with tqdm(
+                total=100, desc="Initializing...",
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+                colour="white"
+            ) as pbar:
+
                 pbar.set_description("Getting local IP & gateway")
                 time.sleep(0.3)
-                pbar.update(15)
+                pbar.update(10)
 
                 pbar.set_description("Getting external IP & DNS")
                 time.sleep(0.3)
-                pbar.update(15)
+                pbar.update(10)
 
                 pbar.set_description(f"Scanning network - {ssid}")
                 try:
@@ -688,28 +923,15 @@ def main():
                     raw_devices = scan(base3 + ".0/24")
                 except Exception:
                     raw_devices = []
-                pbar.update(35)
+                pbar.update(25)
 
-                pbar.set_description("Resolving hostnames")
-                records = []
-                if raw_devices:
-                    step = 30 / len(raw_devices)
-                    for dev in raw_devices:
-                        hostname = get_hostname(dev.get('ip', ''))
-                        records.append({
-                            'ip': dev.get('ip', 'Unknown'),
-                            'mac': dev.get('mac', 'Unknown').upper(),
-                            'vendor': 'Unknown',
-                            'hostname': hostname,
-                        })
-                        pbar.update(step)
-                        time.sleep(0.008)
-                else:
-                    pbar.update(30)
+                pbar.set_description("Vendor lookup / OS detect / port scan")
+                records = device_records(raw_devices)
+                pbar.update(45)
 
                 pbar.set_description("Rendering output")
-                time.sleep(0.3)
-                pbar.update(5)
+                time.sleep(0.2)
+                pbar.update(10)
 
             display(ip, records, dns, ext)
 
