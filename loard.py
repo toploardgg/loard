@@ -11,6 +11,7 @@ import requests
 import pandas as pd
 import queue
 import warnings
+import json
 from datetime import datetime
 from colorama import init, Fore
 from tqdm import tqdm
@@ -99,44 +100,45 @@ def get_usb_drive():
         pass
     return None
 
+def get_save_path():
+    if platform.system() == "Windows":
+        usb = get_usb_drive()
+        if usb and os.path.exists(usb):
+            return os.path.join(usb, "log")
+    else:
+        for base in ("/media", "/run/media", "/mnt", "/Volumes"):
+            if not os.path.exists(base):
+                continue
+            try:
+                for user_dir in os.listdir(base):
+                    user_path = os.path.join(base, user_dir)
+                    if not os.path.isdir(user_path):
+                        continue
+                    for mnt in os.listdir(user_path):
+                        full_path = os.path.join(user_path, mnt)
+                        if os.path.ismount(full_path):
+                            log_dir = os.path.join(full_path, "log")
+                            os.makedirs(log_dir, exist_ok=True)
+                            test_file = os.path.join(log_dir, "tmp.txt")
+                            with open(test_file, "w") as f:
+                                f.write("test")
+                            os.remove(test_file)
+                            return log_dir
+            except Exception:
+                continue
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.join(script_dir, "log")
+
 def init_log():
     global log_file
     filename = datetime.now().strftime("%d.%m.%y_%H-%M") + ".txt"
-
-    if platform.system() == "Windows":
-        usb_drive = get_usb_drive()
-        if usb_drive:
-            try:
-                log_dir = os.path.join(usb_drive, "log")
-                os.makedirs(log_dir, exist_ok=True)
-                log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
-                return log_file
-            except Exception:
-                pass
+    save_path = get_save_path()
+    os.makedirs(save_path, exist_ok=True)
+    try:
+        log_file = open(os.path.join(save_path, filename), "a", encoding="utf-8")
+        return log_file
+    except Exception:
         return None
-
-    for base in ("/media", "/run/media", "/mnt", "/Volumes"):
-        if not os.path.exists(base):
-            continue
-        try:
-            for user_dir in os.listdir(base):
-                user_path = os.path.join(base, user_dir)
-                if not os.path.isdir(user_path):
-                    continue
-                for mnt in os.listdir(user_path):
-                    full_path = os.path.join(user_path, mnt)
-                    if os.path.ismount(full_path):
-                        log_dir = os.path.join(full_path, "log")
-                        os.makedirs(log_dir, exist_ok=True)
-                        test_file = os.path.join(log_dir, "tmp.txt")
-                        with open(test_file, "w") as f:
-                            f.write("test")
-                        os.remove(test_file)
-                        log_file = open(os.path.join(log_dir, filename), "a", encoding="utf-8")
-                        return log_file
-        except Exception:
-            continue
-    return None
 
 def log_print(text=""):
     print(text)
@@ -550,6 +552,16 @@ def get_external_ip():
     except Exception:
         return "Unknown"
 
+def get_geo_city(ip):
+    try:
+        resp = requests.get(f'http://ip-api.com/json/{ip}?fields=city', timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get('city', 'Unknown')
+    except Exception:
+        pass
+    return "Unknown"
+
 def get_traffic_graph(sample_sec: float = 1.0) -> str:
     BAR_WIDTH = 28
     try:
@@ -695,6 +707,82 @@ def run_traceroute(target_ip: str) -> str:
     lines.append("")
     return "\n".join(lines)
 
+def snmp_get(ip, oid, community='public'):
+    try:
+        cmd = ['snmpget', '-v2c', '-c', community, '-Oqv', ip, oid]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+def snmp_walk(ip, oid, community='public'):
+    try:
+        cmd = ['snmpwalk', '-v2c', '-c', community, '-Oqv', ip, oid]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except Exception:
+        pass
+    return []
+
+def get_snmp_info(ip):
+    info = {}
+    sys_name = snmp_get(ip, '1.3.6.1.2.1.1.5.0')
+    if sys_name:
+        info['sysName'] = sys_name
+    sys_descr = snmp_get(ip, '1.3.6.1.2.1.1.1.0')
+    if sys_descr:
+        info['sysDescr'] = sys_descr[:100]
+    uptime = snmp_get(ip, '1.3.6.1.2.1.1.3.0')
+    if uptime:
+        info['uptime'] = uptime
+    arp_entries = snmp_walk(ip, '1.3.6.1.2.1.4.22.1.2')
+    if arp_entries:
+        info['arp_count'] = len(arp_entries)
+    ifaces = snmp_walk(ip, '1.3.6.1.2.1.2.2.1.2')
+    if ifaces:
+        info['interfaces'] = ifaces[:5]
+    return info
+
+def check_smb_shares(ip):
+    try:
+        if platform.system() == "Windows":
+            cmd = ['net', 'view', f'\\\\{ip}']
+        else:
+            cmd = ['smbclient', '-L', f'//{ip}', '-N', '-g']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and ('Sharename' in result.stdout or 'Disk' in result.stdout):
+            return True
+    except Exception:
+        pass
+    return False
+
+def get_ipv6_neighbors():
+    neighbors = []
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.check_output("netsh int ipv6 show neighbors", shell=True, text=True, encoding='cp866', errors='ignore')
+            for line in out.splitlines():
+                if "fe80" in line.lower() or ":" in line:
+                    parts = line.split()
+                    for p in parts:
+                        if ':' in p and p.count(':') >= 2:
+                            ip6 = p.split('%')[0]
+                            if ip6 not in neighbors:
+                                neighbors.append(ip6)
+        else:
+            out = subprocess.check_output(["ip", "-6", "neigh", "show"], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                if 'lladdr' in line or 'FAILED' not in line:
+                    parts = line.split()
+                    if parts and ':' in parts[0]:
+                        neighbors.append(parts[0])
+    except Exception:
+        pass
+    return neighbors
+
 def banner():
     return Fore.RED + r'''
 ██╗      ██████╗  █████╗ ██████╗ ██████╗        ██╗    ███╗
@@ -721,6 +809,9 @@ def device_records(raw_devices):
         open_ports = scan_ports(ip)
         ports_str  = ports_label(open_ports)
 
+        snmp_info = get_snmp_info(ip)
+        smb_vuln = check_smb_shares(ip) if 445 in open_ports else False
+
         records.append({
             'ip':       ip,
             'mac':      mac,
@@ -728,10 +819,12 @@ def device_records(raw_devices):
             'os':       os_guess,
             'hostname': hostname,
             'ports':    ports_str,
+            'snmp':     snmp_info if snmp_info else None,
+            'smb_anon': smb_vuln,
         })
     return records
 
-def display(local_ip, devices, dns_servers, external_ip):
+def display(local_ip, devices, dns_servers, external_ip, geo_city, show_traffic=True):
     clear()
     log_print(banner())
     log_print(Fore.WHITE + f"Local IP:       {local_ip}")
@@ -741,7 +834,7 @@ def display(local_ip, devices, dns_servers, external_ip):
     except Exception:
         subnet = "Unknown"
     log_print(Fore.WHITE + f"Subnet:         {subnet}\n")
-    log_print(Fore.WHITE + f"External IP:    {external_ip}\n")
+    log_print(Fore.WHITE + f"External IP:    {external_ip} ({geo_city})\n")
 
     if external_ip and external_ip != "Unknown":
         log_print(run_traceroute(external_ip))
@@ -763,7 +856,8 @@ def display(local_ip, devices, dns_servers, external_ip):
     log_print(Fore.WHITE + f"Lease Obtained: {dhcp['lease_obtained']}")
     log_print(Fore.WHITE + f"Lease Expires:  {dhcp['lease_expires']}\n")
 
-    log_print(get_traffic_graph())
+    if show_traffic:
+        log_print(get_traffic_graph())
 
     adapters = get_adapter_info()
     if adapters:
@@ -784,12 +878,99 @@ def display(local_ip, devices, dns_servers, external_ip):
             device['ip'], device['mac'], device['vendor'],
             device['os'], device['hostname']))
         log_print(Fore.WHITE + f"  {'Ports:':<12} {device['ports']}")
+        if device.get('snmp'):
+            snmp_str = f"SNMP: {device['snmp'].get('sysName','')} {device['snmp'].get('sysDescr','')[:40]}"
+            log_print(Fore.WHITE + f"  {snmp_str}")
+        if device.get('smb_anon'):
+            log_print(Fore.RED + f"  [!] Anonymous SMB shares available")
         log_print("")
 
     if devices:
         df = pd.DataFrame(devices)
         log_print(Fore.WHITE + "\n[DataFrame]\n")
         log_print(Fore.WHITE + df.to_string(index=False))
+
+    ipv6_neighbors = get_ipv6_neighbors()
+    if ipv6_neighbors:
+        log_print(Fore.WHITE + "\n[IPv6 Neighbors]\n")
+        for ip6 in ipv6_neighbors[:10]:
+            log_print(Fore.WHITE + f"  {ip6}")
+    
+def export_json(devices, local_ip, external_ip, geo_city, dns_servers):
+    data = {
+        "scan_time": datetime.now().isoformat(),
+        "local_ip": local_ip,
+        "external_ip": external_ip,
+        "geo_city": geo_city,
+        "dns_servers": dns_servers,
+        "gateway": get_gateway(),
+        "devices": devices
+    }
+    save_path = get_save_path()
+    os.makedirs(save_path, exist_ok=True)
+    filename = f"network_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    filepath = os.path.join(save_path, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, default=str)
+    log_print(Fore.GREEN + f"\nJSON exported to {filepath}")
+
+def export_html(devices, local_ip, external_ip, geo_city, dns_servers):
+    html_template = """<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Network Scan Report</title>
+<style>
+body {{ font-family: Arial; margin:20px; }}
+table {{ border-collapse: collapse; width:100%; }}
+th, td {{ border:1px solid #ddd; padding:8px; text-align:left; }}
+th {{ background-color:#4CAF50; color:white; }}
+tr:nth-child(even){{background-color:#f2f2f2;}}
+</style>
+</head>
+<body>
+<h1>Network Scan Report</h1>
+<p>Time: {time}</p>
+<p>Local IP: {local_ip}</p>
+<p>External IP: {external_ip} ({geo_city})</p>
+<p>Gateway: {gateway}</p>
+<p>DNS: {dns}</p>
+<h2>Devices</h2>
+<table>
+<tr><th>IP</th><th>MAC</th><th>Vendor</th><th>OS</th><th>Hostname</th><th>Ports</th><th>SMB Anonymous</th></tr>
+{rows}
+</table>
+</body>
+</html>"""
+    rows = ""
+    for d in devices:
+        smb = "Yes" if d.get('smb_anon') else "No"
+        rows += f"<tr><td>{d['ip']}</td><td>{d['mac']}</td><td>{d['vendor']}</td><td>{d['os']}</td><td>{d['hostname']}</td><td>{d['ports']}</td><td>{smb}</td></tr>"
+    html = html_template.format(
+        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        local_ip=local_ip,
+        external_ip=external_ip,
+        geo_city=geo_city,
+        gateway=get_gateway(),
+        dns=", ".join(dns_servers),
+        rows=rows
+    )
+    save_path = get_save_path()
+    os.makedirs(save_path, exist_ok=True)
+    filename = f"network_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    filepath = os.path.join(save_path, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(html)
+    log_print(Fore.GREEN + f"\nHTML report exported to {filepath}")
+
+def get_connection_type():
+    try:
+        for iface, stats in psutil.net_if_stats().items():
+            if not stats.isup:
+                continue
+            if any(x in iface.lower() for x in ("wi", "wlan", "wlp", "airport", "wireless")):
+                return "wifi"
+    except Exception:
+        pass
+    return "ethernet"
 
 class MountWatcher(threading.Thread):
     def __init__(self, check_interval=1.0):
@@ -844,17 +1025,6 @@ class MountWatcher(threading.Thread):
                 self.known_mounts = current
             time.sleep(self.check_interval)
 
-def get_connection_type():
-    try:
-        for iface, stats in psutil.net_if_stats().items():
-            if not stats.isup:
-                continue
-            if any(x in iface.lower() for x in ("wi", "wlan", "wlp", "airport", "wireless")):
-                return "wifi"
-    except Exception:
-        pass
-    return "ethernet"
-
 def main():
     set_title("loard")
     init_log()
@@ -902,6 +1072,7 @@ def main():
             ip  = get_local_ip()
             dns = get_dns()
             ext = get_external_ip()
+            geo = get_geo_city(ext) if ext != "Unknown" else "Unknown"
 
             with tqdm(
                 total=100, desc="Initializing...",
@@ -925,7 +1096,7 @@ def main():
                     raw_devices = []
                 pbar.update(25)
 
-                pbar.set_description("Vendor lookup / OS detect / port scan")
+                pbar.set_description("Vendor lookup / OS detect / port scan / SNMP")
                 records = device_records(raw_devices)
                 pbar.update(45)
 
@@ -933,14 +1104,26 @@ def main():
                 time.sleep(0.2)
                 pbar.update(10)
 
-            display(ip, records, dns, ext)
+            display(ip, records, dns, ext, geo)
 
-            print(Fore.WHITE + "\nEnter = refresh, q = quit")
-            c = input("> ").strip().lower()
-            if c == "q":
+            log_print(Fore.WHITE + "\nEnter = refresh, q = quit, --export json, --export html")
+            cmd = input("> ").strip().lower()
+            if cmd == "q":
                 break
+            elif cmd == "--export json":
+                export_json(records, ip, ext, geo, dns)
+                input("Press Enter to continue...")
+            elif cmd == "--export html":
+                export_html(records, ip, ext, geo, dns)
+                input("Press Enter to continue...")
+            elif cmd == "":
+                continue
+            else:
+                log_print(Fore.WHITE + "Unknown command")
+                time.sleep(0.5)
 
         except KeyboardInterrupt:
+            log_print(Fore.WHITE + "\nProgram terminated.")
             break
         except Exception as e:
             print(f"[ERROR] {e}")
